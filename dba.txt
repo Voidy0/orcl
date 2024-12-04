@@ -1,0 +1,853 @@
+// 2.fragmentation
+
+SELECT  
+    TABLESPACE_NAME,
+    BLOCK_ID,
+    BLOCKS,
+    'FREE' AS SPACE_TYPE
+FROM 
+    DBA_FREE_SPACE
+WHERE 
+    TABLESPACE_NAME = 'STUD'
+UNION ALL
+SELECT 
+    TABLESPACE_NAME,
+    BLOCK_ID,
+    BLOCKS,
+    'OCCUPIED' AS SPACE_TYPE
+FROM 
+    DBA_EXTENTS 
+WHERE 
+    TABLESPACE_NAME = 'STUD';
+
+
+
+
+
+// 3.lock
+
+select * from emp;
+
+        ID NM
+---------- --------------------
+         1 rahi
+
+SQL> select * from emp where id=1 for update;
+
+        ID NM
+---------- --------------------
+         1 rahi
+
+SQL> column username format a20
+SQL> column type format a10
+SQL> column lmode format a20
+SQL> column sid format 9999
+SQL> column serial format a20
+SQL>
+SQL> SELECT s.sid,
+  2         s.serial#,
+  3         s.username,
+  4         l.type,
+  5         l.lmode,
+  6         l.request,
+  7         l.id1,
+  8         l.id2
+  9    FROM v$session s, v$lock l
+ 10   WHERE s.sid = l.sid
+ 11     AND s.sid = 11 ;
+
+  SID    SERIAL# USERNAME             TYPE            LMODE    REQUEST        ID1        ID2
+----- ---------- -------------------- ---------- ---------- ---------- ---------- ----------
+   11      15226 MCA315               AE         ##########          0        134          1
+   11      15226 MCA315               TM         ##########          0     212900          0
+   11      15226 MCA315               TX         ##########          0     524289      18412
+
+
+desc v$session;
+
+select column_names from v$session;
+
+
+
+
+
+
+// 4.latch contention
+
+COLUMN latch_name FORMAT A30
+COLUMN gets FORMAT 999,999,999
+COLUMN misses FORMAT 999,999,999
+COLUMN sleeps FORMAT 999,999
+COLUMN contention_percent FORMAT 999.99
+
+SELECT
+    latch_name,
+    gets,
+    misses,
+    sleeps,
+    ROUND((misses / gets) * 100, 2) AS contention_percent
+FROM
+    v$latch
+WHERE
+    gets > 0
+ORDER BY
+    contention_percent DESC;
+
+
+
+
+
+
+
+
+// 5.data buffer cache hit ration
+
+SQL> select
+  2  ( 1 - (phy.value / ( cur.value + con.value ) ) ) * 100 as "hit ratio"
+  3  from
+  4   v$sysstat cur,
+  5   v$sysstat con,
+  6   v$sysstat phy
+  7  where
+  8    cur.name='db block gets'
+  9    and con.name='consistent gets'
+ 10    and phy.name='physical reads';
+
+ hit ratio
+----------
+98.2096964
+
+
+
+
+
+// 6.shared pool hit ratio
+
+SELECT
+    ROUND((1 - (SUM(reloads) / SUM(pins))) * 100, 2) AS "Shared Pool Hit Ratio (%)"
+FROM
+    v$librarycache
+WHERE
+    namespace = 'SQL AREA'
+    AND pins > 0;
+***************redu log hit ratio***********
+SELECT
+    ROUND((a.value / (a.value + b.value)) * 100, 2) AS "Redo Log Buffer Hit Ratio (%)"
+FROM
+    v$sysstat a,
+    v$sysstat b
+WHERE
+    a.name = 'redo entries'
+    AND b.name = 'redo writes';
+
+
+
+
+
+
+
+// 7.explain plan
+
+ SQL> explain plan for select * from emp where id=1;
+
+Explained.
+
+SQL> select * from table(dbms_xplan.display);
+     OR
+
+EXPLAIN PLAN SET STATEMENT_ID = 'mca15' FOR
+SELECT * FROM emp WHERE id = 1;
+
+SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY('PLAN_TABLE', 'mca', 'BASIC'));
+
+
+
+
+
+
+
+// 8.sort area contention
+
+select p.value/(p.value+d.value) "sort area contenation" from v$sysstat p, v$sysstat d where p.name='sorts (memory)' and d.name='sorts (disk)';
+
+
+
+
+
+
+// 9.varray insert,update,delete
+
+create or replace type phone as varray(5) of varchar(10);
+
+create table student (id number, mno phone);  
+
+create or replace procedure manage_mno(
+    sid in number,
+    acn in varchar,
+    mno in varchar,
+    upmno in varchar default null
+    
+)
+is
+    newphone phone;
+	newnumber phone := phone();
+begin
+  select mno into newphone from students where id=sid;
+  if acn = 'insert' then
+        newphone.extend;
+        newphone(newphone.last):=mno;
+        update students set mno = newphone where id = sid;
+ elsif acn='update' then
+       for i in 1..newphone.count loop
+			if newphone(i) = mno then
+				newphone(i) := upmno;
+                update students set mno = newphone where id = sid;
+			end if;
+		end loop;
+	elsif acn='delete' then
+		for i in 1..newphone.count loop
+			if newphone(i) != mno then
+				newnumber.extend;
+				newnumber(newnumber.count) := newphone(i);
+			 end if;
+		end loop;
+       update students set mno = newnumber where id = sid;
+end if;
+end;
+/
++++++++++++++++++
+begin
+   manage_mno(1,'insert',9876543678);
+end;
+/
+++++++++++++++++
+begin
+   manage_mno(1,'update',9876543678,1234567890);
+end;
+/
+++++++++++++++
+begin
+   manage_mno(1,'delete',987654321);
+end;
+
+
+
+
+
+
+
+// 10.nested table insert,update,delete
+
+CREATE OR REPLACE TYPE submark AS OBJECT (
+    subject_name VARCHAR2(20),
+    mark NUMBER
+);
+
+CREATE OR REPLACE TYPE submarktable AS TABLE OF submark;
+/
+
+CREATE TABLE result (
+    sid NUMBER,              
+    subjects submarktable   
+)
+NESTED TABLE subjects STORE AS sub_table;
+
+
+				  -----insert---------
+CREATE OR REPLACE PROCEDURE insert_subject (
+    p_sid NUMBER,              
+    p_subject_name VARCHAR2,  
+    p_mark NUMBER              
+) IS
+BEGIN
+    
+        INSERT INTO TABLE(SELECT subjects FROM result WHERE sid = p_sid)
+        VALUES(submark(p_subject_name, p_mark));
+    
+    
+    COMMIT;
+END;
+/
+         --------------update--------------
+   CREATE OR REPLACE PROCEDURE update_subject_mark (
+    p_sid NUMBER,              
+    p_subject_name VARCHAR2,   
+    p_new_mark NUMBER          
+) IS
+BEGIN
+    
+    UPDATE TABLE(SELECT subjects FROM result WHERE sid = p_sid)
+    SET mark = p_new_mark
+    WHERE subject_name = p_subject_name;
+    
+    COMMIT;
+END;
+/
+--------------------delete-------------------
+create or replace procedure delete_submark(studid in number,subname in varchar)
+is
+begin
+  delete from table(select subjects from result where sid=studid)where subject_name=subname;
+end;
+/
+exec delete_submark(1,'english');
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+create or replace procedure update_subject(pid in number,psub in varchar,pmarks number)
+is
+begin
+   update table(select subjects from result where sid=pid)set mark=pmarks where subject_name=psub;
+end;
+/
+
+
+
+
+
+
+// 11.export import
+
+exp mca343/Voidy$02@orcl19 file=mca343_schema.dmp log=mca343_export.log owner=mca343 rows=y indexes=y grants=y triggers=y constraints=y
+
+
+imp mca326@orcl19 file=mca343_schema.dmp log=extra_data_import.log
+
+
+
+
+
+
+
+// 12. fragmentation using dbms_space
+
+DECLARE
+  v_unformatted_blocks     NUMBER;
+  v_unformatted_bytes      NUMBER;
+  v_fs1_blocks             NUMBER;
+  v_fs1_bytes              NUMBER;
+  v_fs2_blocks             NUMBER;
+  v_fs2_bytes              NUMBER;
+  v_fs3_blocks             NUMBER;
+  v_fs3_bytes              NUMBER;
+  v_fs4_blocks             NUMBER;
+  v_fs4_bytes              NUMBER;
+  v_full_blocks            NUMBER;
+  v_full_bytes             NUMBER;
+  total_blocks   NUMBER;
+  total_bytes   NUMBER;
+  unused_blocks   NUMBER;
+  unused_bytes   NUMBER;
+  last_used_extent_file_id NUMBER;
+  last_used_extent_block_id NUMBER;
+  last_used_block         NUMBER;
+BEGIN
+  DBMS_SPACE.SPACE_USAGE(
+    segment_owner        => 'MCA345',
+    segment_name         => 'ORGANIZATIONS',
+    segment_type         => 'TABLE',
+    unformatted_blocks   => v_unformatted_blocks,
+    unformatted_bytes    => v_unformatted_bytes,
+    fs1_blocks           => v_fs1_blocks,
+    fs1_bytes            => v_fs1_bytes,
+    fs2_blocks           => v_fs2_blocks,
+    fs2_bytes            => v_fs2_bytes,
+    fs3_blocks           => v_fs3_blocks,
+    fs3_bytes            => v_fs3_bytes,
+    fs4_blocks           => v_fs4_blocks,
+    fs4_bytes            => v_fs4_bytes,
+    full_blocks          => v_full_blocks,
+    full_bytes           => v_full_bytes
+  );
+  DBMS_SPACE.UNUSED_SPACE(
+    segment_owner           => 'MCA345',        
+    segment_name            => 'ORGANIZATIONS',
+    segment_type            => 'TABLE',    
+    total_blocks            => total_blocks,
+    total_bytes             => total_bytes,
+    unused_blocks           => unused_blocks,
+    unused_bytes            => unused_bytes,
+    last_used_extent_file_id => last_used_extent_file_id,
+    last_used_extent_block_id => last_used_extent_block_id,
+    last_used_block         => last_used_block
+  );
+
+  dbms_output.put_line('Total blocks: ' || total_blocks);
+  dbms_output.put_line('Total bytes: ' || total_bytes);
+ 
+  DBMS_OUTPUT.PUT_LINE(' Free Space (FS4): ' || v_fs4_blocks || ' blocks (' || v_fs4_bytes || ' bytes)');
+ 
+END;
+/
+
+
+
+link :- http://192.168.200.13/orcldb/appdev.101/b10802/d_space.htm#ARPLS056
+
+
+
+
+
+
+
+
+
+// 13. dbms_ddl.alter_compile
+
+******************creating invalid procedure***********************
+CREATE OR REPLACE PROCEDURE invalid_procedure AS
+BEGIN
+   SELECT * FROM demo;
+END;
+/
+***************************creating invalid package****************************
+
+CREATE OR REPLACE PACKAGE invalid_package IS
+  PROCEDURE test_procedure;
+END invalid_package;
+/
+
+CREATE OR REPLACE PACKAGE BODY invalid_package IS
+  PROCEDURE test_procedure AS
+  BEGIN
+       SELECT * FROM demo;
+  END test_procedure;
+END invalid_package;
+/
+
+************************recompile*****************************
+BEGIN
+  FOR rec IN (SELECT object_name, object_type 
+              FROM user_objects 
+              WHERE object_type IN ('PACKAGE', 'PROCEDURE') 
+              AND status = 'INVALID') 
+  LOOP
+    DBMS_DDL.alter_compile(rec.object_type, USER, rec.object_name);
+  END LOOP;
+END;
+/
+*****************************show status*********************
+SELECT object_name, object_type, status 
+FROM user_objects 
+WHERE object_type IN ('PACKAGE', 'PROCEDURE');-------must written in capital
+
+
+
+
+
+
+ begin
+    for rec in(select object_name,object_type from user_objects where object_type in('package','procedure') and status='invalid')
+  loop
+     DBMS_DDL.ALTER_COMPILE(REC.OBJECT_TYPE,USER,REC.OBJECT_NAME);
+   END LOOP;
+  END;
+/
+
+
+
+
+
+// 14.dbms_ddl.analyze_object
+
+CREATE CLUSTER std_cluster (sid NUMBER)
+STORAGE (INITIAL 200
+          NEXT 300K
+          MINEXTENTS 2
+          MAXEXTENTS 20
+         );
+
+
+create index std_cluster_index on cluster std_cluster;
+
+create index idx_std ON STUDENT(sid);
+
+CREATE TABLE STUDENT (
+    sid NUMBER,
+    sname VARCHAR2(17),
+    city VARCHAR2(20),
+    phone PhoneArray,  -- VARRAY for phone numbers
+    email VARCHAR2(20),
+    CONSTRAINT pk_std PRIMARY KEY (sid)
+)
+CLUSTER std_cluster (sid);
+
+
+
+BEGIN
+        DBMS_DDL.ANALYZE_OBJECT('TABLE','MCA315', 'student',  'COMPUTE');
+        DBMS_DDL.ANALYZE_OBJECT('CLUSTER','MCA315', 'std_cluster', 'COMPUTE');
+        DBMS_DDL.ANALYZE_OBJECT('INDEX','MCA315', 'std_cluster_index', 'COMPUTE');
+ END;
+/
+
+----->view table
+SQL> SELECT table_name, num_rows, blocks, avg_row_len from user_tab_statistics where table_name='STUDENT';****table name must written in capital
+
+TABLE_NAME                                                                                                                NUM_ROWS      BLOCKS AVG_ROW_LEN
+-------------------------------------------------------------------------------------------------------------------------------- ---------- ---------- -----------
+STUDENT
+ 1           5          80
+
+---->view cluster
+
+SQL> select cluster_name from dba_clusters where owner='MCA315';
+
+CLUSTER_NAME
+--------------------------------------------------------------------------------------------------------------------------------
+BOOKCLT
+STD_CLUSTER
+
+-------->VIEW INDEX
+SQL> SELECT index_name, num_rows, leaf_blocks, distinct_keys FROM user_indexes where index_name='STD_CLUSTER_INDEX';**** name must written in capital
+
+
+INDEX_NAME                                                                                                                NUM_ROWS LEAF_BLOCKS DISTINCT_KEYS
+-------------------------------------------------------------------------------------------------------------------------------- ---------- ----------- -------------
+STD_CLUSTER_INDEX
+ 1            1             1
+
+
+
+
+
+
+
+
+// 15. import export
+
+
+Run Loader here if tell
+
+exp mca343/Voidy$02@orcl19 file=mca343_schema.dmp log=mca343_export.log owner=mca343 rows=y indexes=y grants=y triggers=y constraints=y exclude=PROCEDURE
+
+
+imp mca326@orcl19 file=mca343_schema.dmp log=extra_data_import.log
+
+
+
+
+
+
+// 16. --> 2.
+
+
+
+
+
+
+
+// 17.dbms_sql
+
+CREATE OR REPLACE PROCEDURE insert_product_dbms_sql(
+    p_product_id   IN NUMBER,
+    p_product_name IN VARCHAR2,
+    p_price        IN NUMBER
+)
+IS
+    v_cursor INTEGER;
+    v_rows   NUMBER;
+    v_sql    VARCHAR2(1000);
+BEGIN
+    -- Define the SQL statement dynamically
+    v_sql := 'INSERT INTO Products (ProductID, ProductName, Price) VALUES (:1, :2, :3)';
+
+    -- Open a new cursor
+    v_cursor := DBMS_SQL.OPEN_CURSOR;
+
+    -- Parse the SQL statement
+    DBMS_SQL.PARSE(v_cursor, v_sql, DBMS_SQL.NATIVE);
+
+    -- Bind variables
+    DBMS_SQL.BIND_VARIABLE(v_cursor, ':1', p_product_id);
+    DBMS_SQL.BIND_VARIABLE(v_cursor, ':2', p_product_name);
+    DBMS_SQL.BIND_VARIABLE(v_cursor, ':3', p_price);
+
+    -- Execute the statement
+    v_rows := DBMS_SQL.EXECUTE(v_cursor);
+
+    -- Print feedback
+    DBMS_OUTPUT.PUT_LINE(v_rows || ' row(s) inserted successfully.');
+
+    -- Close the cursor
+    DBMS_SQL.CLOSE_CURSOR(v_cursor);
+EXCEPTION
+    WHEN OTHERS THEN
+        IF DBMS_SQL.IS_OPEN(v_cursor) THEN
+            DBMS_SQL.CLOSE_CURSOR(v_cursor);
+        END IF;
+        RAISE;
+END insert_product_dbms_sql;
+/
+BEGIN
+    insert_product_dbms_sql(1, 'Laptop', 750.00);
+    insert_product_dbms_sql(2, 'Smartphone', 500.00);
+END;
+/
+
+
+
+
+
+
+
+
+
+CREATE OR REPLACE PROCEDURE update_product_dbms_sql(
+    p_product_id   IN NUMBER,
+    p_product_name IN VARCHAR2,
+    p_price        IN NUMBER
+)
+IS
+    v_cursor INTEGER;
+    v_rows   NUMBER;
+    v_sql    VARCHAR2(1000);
+BEGIN
+    -- Define the SQL statement dynamically
+    v_sql := 'UPDATE Products SET ProductName = :1, Price = :2 WHERE ProductID = :3';
+
+    -- Open a new cursor
+    v_cursor := DBMS_SQL.OPEN_CURSOR;
+
+    -- Parse the SQL statement
+    DBMS_SQL.PARSE(v_cursor, v_sql, DBMS_SQL.NATIVE);
+
+    -- Bind variables
+    DBMS_SQL.BIND_VARIABLE(v_cursor, ':1', p_product_name);
+    DBMS_SQL.BIND_VARIABLE(v_cursor, ':2', p_price);
+    DBMS_SQL.BIND_VARIABLE(v_cursor, ':3', p_product_id);
+
+    -- Execute the statement
+    v_rows := DBMS_SQL.EXECUTE(v_cursor);
+
+    -- Print feedback
+    IF v_rows = 0 THEN
+        DBMS_OUTPUT.PUT_LINE('No record found to update.');
+    ELSE
+        DBMS_OUTPUT.PUT_LINE(v_rows || ' row(s) updated successfully.');
+    END IF;
+
+    -- Close the cursor
+    DBMS_SQL.CLOSE_CURSOR(v_cursor);
+EXCEPTION
+    WHEN OTHERS THEN
+        IF DBMS_SQL.IS_OPEN(v_cursor) THEN
+            DBMS_SQL.CLOSE_CURSOR(v_cursor);
+        END IF;
+        RAISE;
+END update_product_dbms_sql;
+/
+
+BEGIN
+    update_product_dbms_sql(2, 'Smartphone Pro', 550.00);
+END;
+/
+
+
+
+
+
+
+
+CREATE OR REPLACE PROCEDURE delete_product_dbms_sql(
+    p_product_id IN NUMBER
+)
+IS
+    v_cursor INTEGER;
+    v_rows   NUMBER;
+    v_sql    VARCHAR2(1000);
+BEGIN
+    -- Define the SQL statement dynamically
+    v_sql := 'DELETE FROM Products WHERE ProductID = :1';
+
+    -- Open a new cursor
+    v_cursor := DBMS_SQL.OPEN_CURSOR;
+
+    -- Parse the SQL statement
+    DBMS_SQL.PARSE(v_cursor, v_sql, DBMS_SQL.NATIVE);
+
+    -- Bind variable
+    DBMS_SQL.BIND_VARIABLE(v_cursor, ':1', p_product_id);
+
+    -- Execute the statement
+    v_rows := DBMS_SQL.EXECUTE(v_cursor);
+
+    -- Print feedback
+    IF v_rows = 0 THEN
+        DBMS_OUTPUT.PUT_LINE('No record found to delete.');
+    ELSE
+        DBMS_OUTPUT.PUT_LINE(v_rows || ' row(s) deleted successfully.');
+    END IF;
+
+    -- Close the cursor
+    DBMS_SQL.CLOSE_CURSOR(v_cursor);
+EXCEPTION
+    WHEN OTHERS THEN
+        IF DBMS_SQL.IS_OPEN(v_cursor) THEN
+            DBMS_SQL.CLOSE_CURSOR(v_cursor);
+        END IF;
+        RAISE;
+END delete_product_dbms_sql;
+/
+
+BEGIN
+    delete_product_dbms_sql(2);
+END;
+/
+
+
+
+
+------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+create or replace procedure select_product_dbms_sql(
+    p_product_id in number
+)
+is
+    v_cursor       integer;         -- cursor to execute the query
+    v_sql          varchar2(1000);  -- sql query
+    v_product_name varchar2(100);   -- to hold the fetched productname
+    v_price        number;          -- to hold the fetched price
+    v_status       integer;         -- fetch status
+begin
+    v_sql := 'select productname, price from products where productid = :1';
+
+    v_cursor := dbms_sql.open_cursor;
+
+    dbms_sql.parse(v_cursor, v_sql, dbms_sql.native);
+
+    dbms_sql.bind_variable(v_cursor, ':1', p_product_id);
+
+    dbms_sql.define_column(v_cursor, 1, v_product_name, 100); -- specify the size for varchar2
+    dbms_sql.define_column(v_cursor, 2, v_price);             -- no size needed for number
+
+    v_status := dbms_sql.execute(v_cursor);
+
+    if dbms_sql.fetch_rows(v_cursor) > 0 then
+        -- get the column values
+        dbms_sql.column_value(v_cursor, 1, v_product_name);
+        dbms_sql.column_value(v_cursor, 2, v_price);
+
+        -- display the fetched values
+        dbms_output.put_line('product name: ' || v_product_name || ', price: ' || v_price);
+    else
+        dbms_output.put_line('no record found for productid: ' || p_product_id);
+    end if;
+
+    -- close the cursor
+    dbms_sql.close_cursor(v_cursor);
+
+exception
+    when others then
+        -- ensure the cursor is closed in case of an error
+        if dbms_sql.is_open(v_cursor) then
+            dbms_sql.close_cursor(v_cursor);
+        end if;
+        raise;
+end select_product_dbms_sql;
+/
+
+
+
+
+
+begin
+    insert_product_dbms_sql(1, 'Laptop', 110000);
+    insert_product_dbms_sql(2, 'Smartphone', 175000);
+    insert_product_dbms_sql(3, 'Pc', 175000);
+    insert_product_dbms_sql(4, 'Speaker', 175000);
+end;
+/
+
+begin
+    select_product_dbms_sql(1);
+end;
+/
+
+
+
+
+
+
+
+
+// 19. loader
+
+
+***department_loader.txt
+1,HR
+2,Finance
+3,IT
+4,Marketing
+9,Logistics
+10,Customer Support
+11,Engineering
+12,education
+
+
+***department_control.ctl
+load data
+infile 'department_loader.txt'
+into table department
+fields terminated by ','
+(
+   id,
+   dept_name
+)
+
+
+***control_append.ctl
+LOAD DATA
+INFILE 'department_loader.txt'
+INTO TABLE department
+APPEND
+FIELDS TERMINATED BY ',' 
+(
+   id,
+   dept_name
+)
+
+
+
+***condition_control.ctl
+LOAD DATA
+INFILE 'department_loader.txt'
+BADFILE 'bad_file.bad'
+DISCARDFILE 'discard_file.dsc'
+INTO TABLE department
+APPEND
+WHEN dept_name = 'educatio'
+FIELDS TERMINATED BY ','
+(
+   id,
+   dept_name
+)
+
+
+
+***position.ctl
+LOAD DATA
+INFILE 'department_loader.txt'
+INTO TABLE department
+APPEND
+FIELDS TERMINATED BY ',' 
+(
+   id POSITION (1:1) INTEGER EXTERNAl ,
+   dept_name  POSITION (4:18) 
+)
+
+
+
+
+
+
+Run in cmd :- sqlldr userid=mca300/gvpgvp@orcl19 control="controlfile.ctl"
